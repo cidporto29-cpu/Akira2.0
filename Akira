@@ -1,0 +1,903 @@
+--[[
+    ╔══════════════════════════════════════════════════════════╗
+    ║            ZAZAK HUB v4.1 - INSTANT STEAL                ║
+    ╚══════════════════════════════════════════════════════════╝
+--]]
+
+local Players           = game:GetService("Players")
+local RunService        = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local UserInputService  = game:GetService("UserInputService")
+local CoreGui           = game:GetService("CoreGui")
+local TweenService      = game:GetService("TweenService")
+local StarterGui        = game:GetService("StarterGui")
+local localPlayer       = Players.LocalPlayer
+
+--═══════════════════════════════════════════════════════════════
+-- UTILS
+--═══════════════════════════════════════════════════════════════
+local function safeRequire(getter)
+    local ok, r = pcall(function() return require(getter()) end)
+    return ok and r or nil
+end
+local function waitChild(parent, nome, timeout)
+    local ok, r = pcall(function() return parent:WaitForChild(nome, timeout or 10) end)
+    return ok and r or nil
+end
+
+local networking = waitChild(ReplicatedStorage, "Packages", 15)
+networking = networking and waitChild(networking, "Networking", 10)
+
+local Assets = safeRequire(function() return ReplicatedStorage.Data.Assets end)
+
+local function remote(name)
+    if not networking then return nil end
+    return networking:FindFirstChild(name)
+end
+local function root()
+    local c = localPlayer.Character
+    return c and c:FindFirstChild("HumanoidRootPart")
+end
+local function humanoid()
+    local c = localPlayer.Character
+    return c and c:FindFirstChildOfClass("Humanoid")
+end
+local function character() return localPlayer.Character end
+
+local function notify(titulo, texto, duracao)
+    pcall(function()
+        StarterGui:SetCore("SendNotification", {
+            Title = tostring(titulo),
+            Text = tostring(texto),
+            Duration = tonumber(duracao) or 3,
+        })
+    end)
+end
+
+--═══════════════════════════════════════════════════════════════
+-- CONFIG
+--═══════════════════════════════════════════════════════════════
+local CFG = {
+    InstantSteal = false,
+    AutoEquip    = false,
+    BatAura      = false,
+    ES_Ovos      = false,
+    SpeedBoost   = false,
+    SpeedBoostVal= 300,
+    Flight       = false,
+    FlightSpeed  = 400,
+    AntiKick     = true,
+    AntiRagdoll  = true,
+    OriginalSpeed= 16,
+    Intervalo    = 0.15,
+}
+
+local FlyKeys = { W=false, A=false, S=false, D=false, Space=false, Ctrl=false }
+
+--═══════════════════════════════════════════════════════════════
+-- ANTI-KICK
+--═══════════════════════════════════════════════════════════════
+local function ativarAntiKick()
+    pcall(function()
+        if hookfunction then
+            local old = hookfunction(localPlayer.Kick, function(self, msg)
+                if CFG.AntiKick then
+                    warn("[Zazak] Kick bloqueado: " .. tostring(msg))
+                    return nil
+                end
+                return old(self, msg)
+            end)
+        end
+    end)
+    pcall(function()
+        if getrawmetatable and setreadonly and newcclosure then
+            local mt = getrawmetatable(game)
+            setreadonly(mt, false)
+            local old = mt.__namecall
+            mt.__namecall = newcclosure(function(self, ...)
+                local m = getnamecallmethod and getnamecallmethod()
+                if CFG.AntiKick and m == "Kick" and typeof(self) == "Instance" and self:IsA("Player") then
+                    return nil
+                end
+                return old(self, ...)
+            end)
+            setreadonly(mt, true)
+        end
+    end)
+end
+
+--═══════════════════════════════════════════════════════════════
+-- ANTI-RAGDOLL
+--═══════════════════════════════════════════════════════════════
+local RAGDOLL_STATES = {
+    [Enum.HumanoidStateType.Ragdoll] = true,
+    [Enum.HumanoidStateType.Physics] = true,
+    [Enum.HumanoidStateType.FallingDown] = true,
+}
+local RAGDOLL_CLASSES = {
+    BallSocketConstraint = true,
+    NoCollisionConstraint = true,
+    HingeConstraint = true,
+    RigidConstraint = true,
+}
+
+RunService.Heartbeat:Connect(function()
+    if not CFG.AntiRagdoll then return end
+    local char = character()
+    local h = humanoid()
+    if not char or not h then return end
+    pcall(function()
+        for state in pairs(RAGDOLL_STATES) do h:SetStateEnabled(state, false) end
+        if h.PlatformStand then h.PlatformStand = false end
+        if h.Sit then h.Sit = false end
+        local st = h:GetState()
+        if st == Enum.HumanoidStateType.Physics or st == Enum.HumanoidStateType.Ragdoll then
+            h:ChangeState(Enum.HumanoidStateType.Running)
+        end
+        for _, d in ipairs(char:GetDescendants()) do
+            if RAGDOLL_CLASSES[d.ClassName] then
+                d:Destroy()
+            elseif d:IsA("Motor6D") and not d.Enabled then
+                d.Enabled = true
+            end
+        end
+    end)
+end)
+
+--═══════════════════════════════════════════════════════════════
+-- SPEED BOOST
+--═══════════════════════════════════════════════════════════════
+RunService.Heartbeat:Connect(function()
+    local h = humanoid()
+    if not h then return end
+    if CFG.SpeedBoost then h.WalkSpeed = CFG.SpeedBoostVal end
+end)
+
+localPlayer.CharacterAdded:Connect(function()
+    task.wait(1)
+    local h = humanoid()
+    if h and CFG.SpeedBoost then h.WalkSpeed = CFG.SpeedBoostVal end
+end)
+
+--═══════════════════════════════════════════════════════════════
+-- FLIGHT
+--═══════════════════════════════════════════════════════════════
+local Fly = { conn = nil, bv = nil, bg = nil }
+
+function Fly.start()
+    local char = character()
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    local h = char and char:FindFirstChildOfClass("Humanoid")
+    if not hrp or not h then return end
+    h.PlatformStand = true
+    pcall(function() Fly.stop() end)
+
+    local bv = Instance.new("BodyVelocity")
+    bv.MaxForce = Vector3.new(1e9, 1e9, 1e9)
+    bv.Velocity = Vector3.zero
+    bv.Parent = hrp
+    Fly.bv = bv
+
+    local bg = Instance.new("BodyGyro")
+    bg.MaxTorque = Vector3.new(1e9, 1e9, 1e9)
+    bg.P = 1500
+    bg.D = 60
+    bg.CFrame = hrp.CFrame
+    bg.Parent = hrp
+    Fly.bg = bg
+
+    Fly.conn = RunService.RenderStepped:Connect(function()
+        local cam = workspace.CurrentCamera
+        if not cam or not hrp.Parent then return end
+        local dir = Vector3.zero
+        local look = cam.CFrame.LookVector
+        local right = cam.CFrame.RightVector
+
+        if FlyKeys.W then dir += look end
+        if FlyKeys.S then dir -= look end
+        if FlyKeys.D then dir += right end
+        if FlyKeys.A then dir -= right end
+        if FlyKeys.Space then dir += Vector3.new(0, 1, 0) end
+        if FlyKeys.Ctrl then dir -= Vector3.new(0, 1, 0) end
+        if dir.Magnitude > 0 then dir = dir.Unit * CFG.FlightSpeed end
+
+        bv.Velocity = dir
+        bg.CFrame = CFrame.new(hrp.Position, hrp.Position + look)
+    end)
+end
+
+function Fly.stop()
+    if Fly.conn then pcall(function() Fly.conn:Disconnect() end) Fly.conn = nil end
+    if Fly.bv then pcall(function() Fly.bv:Destroy() end) Fly.bv = nil end
+    if Fly.bg then pcall(function() Fly.bg:Destroy() end) Fly.bg = nil end
+    local h = humanoid()
+    if h then h.PlatformStand = false end
+end
+
+UserInputService.InputBegan:Connect(function(input, gp)
+    if gp then return end
+    if input.KeyCode == Enum.KeyCode.W then FlyKeys.W = true end
+    if input.KeyCode == Enum.KeyCode.A then FlyKeys.A = true end
+    if input.KeyCode == Enum.KeyCode.S then FlyKeys.S = true end
+    if input.KeyCode == Enum.KeyCode.D then FlyKeys.D = true end
+    if input.KeyCode == Enum.KeyCode.Space then FlyKeys.Space = true end
+    if input.KeyCode == Enum.KeyCode.LeftControl then FlyKeys.Ctrl = true end
+end)
+UserInputService.InputEnded:Connect(function(input)
+    if input.KeyCode == Enum.KeyCode.W then FlyKeys.W = false end
+    if input.KeyCode == Enum.KeyCode.A then FlyKeys.A = false end
+    if input.KeyCode == Enum.KeyCode.S then FlyKeys.S = false end
+    if input.KeyCode == Enum.KeyCode.D then FlyKeys.D = false end
+    if input.KeyCode == Enum.KeyCode.Space then FlyKeys.Space = false end
+    if input.KeyCode == Enum.KeyCode.LeftControl then FlyKeys.Ctrl = false end
+end)
+
+--═══════════════════════════════════════════════════════════════
+-- REMOTES
+--═══════════════════════════════════════════════════════════════
+local function listarOvos()
+    local rem = remote("RF/EggWorld/AskFieldEggSnapshot")
+    if not rem then return {} end
+    local ok, result = pcall(function() return rem:InvokeServer() end)
+    if not ok or type(result) ~= "table" then return {} end
+    local recs = result.Records
+    if type(recs) ~= "table" then return {} end
+    local lista = {}
+    for _, rec in pairs(recs) do
+        if type(rec) == "table" and type(rec.Uid) == "string"
+           and (rec.State == "Slot" or rec.State == "Dropped")
+           and typeof(rec.BottomCFrame) == "CFrame" then
+            lista[#lista + 1] = rec
+        end
+    end
+    return lista
+end
+
+local function pegarOvo(rec)
+    local rem = remote("RF/EggWorld/AskFieldEggCarry")
+    if not rem then return false end
+    local firstAreaSlotKey = rec.FirstAreaSlotKey
+    if not firstAreaSlotKey then
+        local slotKey = rec.Uid:match(":(Slot_%d+)$")
+        local area = tostring(rec.AreaId or "Forest")
+        if slotKey then firstAreaSlotKey = area .. ":" .. slotKey end
+    end
+    local args = { Uid = rec.Uid }
+    if firstAreaSlotKey then args.FirstAreaSlotKey = firstAreaSlotKey end
+    local ok = pcall(function() rem:InvokeServer(args) end)
+    if ok then return true end
+    return pcall(function() rem:InvokeServer({ Uid = rec.Uid }) end)
+end
+
+local function equiparOvo(uid)
+    local rem = remote("RF/EggWorld/AskWearTool")
+    if not rem then return false end
+    return pcall(function() rem:InvokeServer(uid) end)
+end
+
+local function equiparMelhor()
+    local rem = remote("RF/Haul/WearBest")
+    if not rem then return false end
+    return pcall(function() rem:InvokeServer() end)
+end
+
+local function baterNo(player)
+    local rem = remote("RE/BatSwing/Trigger")
+    if not rem then return false end
+    return pcall(function() rem:FireServer(player) end)
+end
+
+--═══════════════════════════════════════════════════════════════
+-- INSTANT STEAL (loop otimizado)
+--═══════════════════════════════════════════════════════════════
+task.spawn(function()
+    while true do
+        task.wait(CFG.Intervalo)
+        if CFG.InstantSteal then
+            local ovos = listarOvos()
+            if #ovos > 0 then
+                -- Pega o maior
+                local melhor = ovos[1]
+                for _, o in ipairs(ovos) do
+                    if (tonumber(o.AssetScale) or 1) > (tonumber(melhor.AssetScale) or 1) then
+                        melhor = o
+                    end
+                end
+                local hrp = root()
+                if hrp and typeof(melhor.BottomCFrame) == "CFrame" then
+                    local pos = melhor.BottomCFrame.Position
+                    if (hrp.Position - pos).Magnitude > 3 then
+                        pcall(function()
+                            hrp.CFrame = CFrame.new(pos + Vector3.new(0, 3, 0))
+                            hrp.AssemblyLinearVelocity = Vector3.zero
+                            hrp.AssemblyAngularVelocity = Vector3.zero
+                        end)
+                    end
+                    pegarOvo(melhor)
+                end
+            end
+        end
+    end
+end)
+
+--═══════════════════════════════════════════════════════════════
+-- AUTO EQUIP BEST
+--═══════════════════════════════════════════════════════════════
+task.spawn(function()
+    while true do
+        task.wait(3)
+        if CFG.AutoEquip then equiparMelhor() end
+    end
+end)
+
+--═══════════════════════════════════════════════════════════════
+-- BAT AURA
+--═══════════════════════════════════════════════════════════════
+task.spawn(function()
+    while true do
+        task.wait(0.5)
+        if CFG.BatAura then
+            local hrp = root()
+            if hrp then
+                for _, player in ipairs(Players:GetPlayers()) do
+                    if player ~= localPlayer then
+                        local phrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+                        local hum = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
+                        if phrp and hum and hum.Health > 0 then
+                            if (hrp.Position - phrp.Position).Magnitude < 20 then
+                                baterNo(player)
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+end)
+
+--═══════════════════════════════════════════════════════════════
+-- ESP OVOS
+--═══════════════════════════════════════════════════════════════
+local ESP = { ovos = {} }
+
+task.spawn(function()
+    while true do
+        task.wait(0.6)
+        if CFG.ES_Ovos then
+            local vistos = {}
+            for _, rec in ipairs(listarOvos()) do
+                local uid = rec.Uid
+                vistos[uid] = true
+                if not ESP.ovos[uid] then
+                    local dummy = Instance.new("Part")
+                    dummy.Anchored = true
+                    dummy.CanCollide = false
+                    dummy.CanQuery = false
+                    dummy.CanTouch = false
+                    dummy.Transparency = 1
+                    dummy.Size = Vector3.new(0.1, 0.1, 0.1)
+                    dummy.CFrame = CFrame.new(rec.BottomCFrame.Position)
+                    dummy.Name = "ZazakESP"
+                    dummy.Parent = workspace
+
+                    local hl = Instance.new("Highlight")
+                    hl.FillColor = Color3.fromRGB(150, 70, 255)
+                    hl.OutlineColor = Color3.fromRGB(210, 140, 255)
+                    hl.FillTransparency = 0.5
+                    hl.OutlineTransparency = 0
+                    hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+                    hl.Adornee = dummy
+                    hl.Parent = dummy
+
+                    local bb = Instance.new("BillboardGui")
+                    bb.Size = UDim2.new(0, 160, 0, 50)
+                    bb.StudsOffset = Vector3.new(0, 3, 0)
+                    bb.AlwaysOnTop = true
+                    bb.Parent = dummy
+
+                    local nome = tostring(rec.AssetCategory or "Egg")
+                    if Assets and Assets.Directory then
+                        local d = Assets.Directory[tostring(rec.AssetCategory)]
+                        if d and d.DisplayName then nome = tostring(d.DisplayName) end
+                    end
+
+                    local txt = Instance.new("TextLabel")
+                    txt.Size = UDim2.fromScale(1, 1)
+                    txt.BackgroundTransparency = 1
+                    txt.Font = Enum.Font.GothamBold
+                    txt.TextSize = 12
+                    txt.TextColor3 = Color3.fromRGB(255, 255, 255)
+                    txt.TextStrokeTransparency = 0
+                    txt.Text = nome
+                    txt.Parent = bb
+
+                    ESP.ovos[uid] = dummy
+                else
+                    pcall(function()
+                        ESP.ovos[uid].CFrame = CFrame.new(rec.BottomCFrame.Position)
+                    end)
+                end
+            end
+            -- remove antigos
+            for uid, dummy in pairs(ESP.ovos) do
+                if not vistos[uid] then
+                    pcall(function() dummy:Destroy() end)
+                    ESP.ovos[uid] = nil
+                end
+            end
+        else
+            if next(ESP.ovos) then
+                for k, v in pairs(ESP.ovos) do
+                    pcall(function() v:Destroy() end)
+                    ESP.ovos[k] = nil
+                end
+            end
+        end
+    end
+end)
+
+--═══════════════════════════════════════════════════════════════
+-- INTERFACE
+--═══════════════════════════════════════════════════════════════
+local C = {
+    Fundo      = Color3.fromRGB(14, 12, 18),
+    Sidebar    = Color3.fromRGB(20, 16, 28),
+    Card       = Color3.fromRGB(28, 22, 40),
+    Aba        = Color3.fromRGB(35, 26, 50),
+    AbaAtiva   = Color3.fromRGB(150, 70, 255),
+    Roxo       = Color3.fromRGB(150, 70, 255),
+    RoxoClaro  = Color3.fromRGB(190, 130, 255),
+    Texto      = Color3.fromRGB(240, 235, 250),
+    Dim        = Color3.fromRGB(150, 140, 175),
+    Verde      = Color3.fromRGB(90, 255, 160),
+    Vermelho   = Color3.fromRGB(255, 90, 100),
+}
+
+local function new(class, props, children)
+    local obj = Instance.new(class)
+    for k, v in pairs(props or {}) do pcall(function() obj[k] = v end) end
+    for _, c in ipairs(children or {}) do pcall(function() c.Parent = obj end) end
+    return obj
+end
+
+local gui = new("ScreenGui", {
+    Name = "ZazakHub41",
+    ResetOnSpawn = false,
+    ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+    IgnoreGuiInset = true,
+})
+gui.Parent = CoreGui
+
+-- Botão flutuante
+local btnFlut = new("TextButton", {
+    Size = UDim2.new(0, 56, 0, 56),
+    Position = UDim2.new(0, 20, 0, 100),
+    BackgroundColor3 = C.Roxo,
+    BorderSizePixel = 0,
+    Font = Enum.Font.GothamBlack,
+    TextSize = 26,
+    TextColor3 = Color3.new(1, 1, 1),
+    Text = "Z",
+    AutoButtonColor = false,
+}, {
+    new("UICorner", { CornerRadius = UDim.new(1, 0) }),
+    new("UIStroke", { Color = C.RoxoClaro, Thickness = 2 }),
+})
+btnFlut.Parent = gui
+
+-- Janela principal
+local win = new("Frame", {
+    Name = "Win",
+    Size = UDim2.new(0, 560, 0, 400),
+    Position = UDim2.new(0.5, -280, 0.5, -200),
+    BackgroundColor3 = C.Fundo,
+    BorderSizePixel = 0,
+    Active = true,
+    Draggable = true,
+    Visible = false,
+}, {
+    new("UICorner", { CornerRadius = UDim.new(0, 14) }),
+    new("UIStroke", { Color = C.Roxo, Thickness = 2 }),
+})
+win.Parent = gui
+
+-- Sidebar
+local sidebar = new("Frame", {
+    Size = UDim2.new(0, 140, 1, 0),
+    BackgroundColor3 = C.Sidebar,
+    BorderSizePixel = 0,
+}, { new("UICorner", { CornerRadius = UDim.new(0, 14) }) })
+sidebar.Parent = win
+
+-- Topbar
+new("Frame", {
+    Size = UDim2.new(1, 0, 0, 60),
+    BackgroundColor3 = C.Roxo,
+    BorderSizePixel = 0,
+}, {
+    new("UICorner", { CornerRadius = UDim.new(0, 14) }),
+    new("TextLabel", {
+        Size = UDim2.new(1, 0, 0, 28),
+        Position = UDim2.new(0, 0, 0, 12),
+        BackgroundTransparency = 1,
+        Font = Enum.Font.GothamBlack,
+        TextSize = 16,
+        TextColor3 = Color3.new(1, 1, 1),
+        Text = "ZAZAK HUB",
+    }),
+    new("TextLabel", {
+        Size = UDim2.new(1, 0, 0, 14),
+        Position = UDim2.new(0, 0, 0, 36),
+        BackgroundTransparency = 1,
+        Font = Enum.Font.GothamMedium,
+        TextSize = 10,
+        TextColor3 = Color3.fromRGB(240, 220, 255),
+        Text = "v4.1 • Instant Steal",
+    }),
+}).Parent = sidebar
+
+local tabList = new("Frame", {
+    Size = UDim2.new(1, -12, 1, -80),
+    Position = UDim2.new(0, 6, 0, 70),
+    BackgroundTransparency = 1,
+}, { new("UIListLayout", { Padding = UDim.new(0, 4) }) })
+tabList.Parent = sidebar
+
+local contentArea = new("Frame", {
+    Size = UDim2.new(1, -150, 1, -20),
+    Position = UDim2.new(0, 146, 0, 10),
+    BackgroundTransparency = 1,
+})
+contentArea.Parent = win
+
+local header = new("Frame", {
+    Size = UDim2.new(1, 0, 0, 50),
+    BackgroundTransparency = 1,
+})
+header.Parent = contentArea
+
+local tituloTab = new("TextLabel", {
+    Size = UDim2.new(1, -50, 0, 30),
+    BackgroundTransparency = 1,
+    Font = Enum.Font.GothamBlack,
+    TextSize = 22,
+    TextColor3 = C.Texto,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    Text = "Farm",
+})
+tituloTab.Parent = header
+
+new("TextButton", {
+    Name = "Fechar",
+    Size = UDim2.new(0, 30, 0, 30),
+    Position = UDim2.new(1, -35, 0, 5),
+    BackgroundColor3 = C.Vermelho,
+    BorderSizePixel = 0,
+    Font = Enum.Font.GothamBold,
+    TextSize = 14,
+    TextColor3 = Color3.new(1, 1, 1),
+    Text = "✕",
+}, { new("UICorner", { CornerRadius = UDim.new(0, 8) }) }).Parent = header
+
+local scroll = new("ScrollingFrame", {
+    Size = UDim2.new(1, 0, 1, -55),
+    Position = UDim2.new(0, 0, 0, 55),
+    BackgroundTransparency = 1,
+    BorderSizePixel = 0,
+    ScrollBarThickness = 3,
+    ScrollBarImageColor3 = C.Roxo,
+    CanvasSize = UDim2.new(0, 0, 0, 0),
+    AutomaticCanvasSize = Enum.AutomaticSize.Y,
+}, {
+    new("UIListLayout", { Padding = UDim.new(0, 8) }),
+    new("UIPadding", { PaddingRight = UDim.new(0, 10), PaddingBottom = UDim.new(0, 12) }),
+})
+scroll.Parent = contentArea
+
+-- Componentes
+local function novoCard(nome, sub)
+    local f = new("Frame", {
+        Size = UDim2.new(1, 0, 0, sub and 72 or 54),
+        BackgroundColor3 = C.Card,
+        BorderSizePixel = 0,
+    }, {
+        new("UICorner", { CornerRadius = UDim.new(0, 10) }),
+        new("UIStroke", { Color = C.Roxo, Thickness = 1, Transparency = 0.7 }),
+    })
+    f.Parent = scroll
+    new("TextLabel", {
+        Size = UDim2.new(1, -20, 0, 20),
+        Position = UDim2.new(0, 14, 0, sub and 10 or 8),
+        BackgroundTransparency = 1,
+        Font = Enum.Font.GothamBold,
+        TextSize = 13,
+        TextColor3 = C.Texto,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        Text = nome,
+    }).Parent = f
+    if sub then
+        new("TextLabel", {
+            Size = UDim2.new(1, -20, 0, 14),
+            Position = UDim2.new(0, 14, 0, 30),
+            BackgroundTransparency = 1,
+            Font = Enum.Font.Gotham,
+            TextSize = 11,
+            TextColor3 = C.Dim,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            Text = sub,
+        }).Parent = f
+    end
+    return f
+end
+
+local function novoToggle(parent, nome, valor, callback, sub)
+    local card = novoCard(nome, sub)
+    card.Parent = parent
+
+    local track = new("Frame", {
+        Size = UDim2.new(0, 44, 0, 24),
+        Position = UDim2.new(1, -54, 0, sub and 24 or 15),
+        BackgroundColor3 = valor and C.Verde or Color3.fromRGB(70, 60, 90),
+        BorderSizePixel = 0,
+    }, { new("UICorner", { CornerRadius = UDim.new(1, 0) }) })
+    track.Parent = card
+
+    local knob = new("Frame", {
+        Size = UDim2.new(0, 18, 0, 18),
+        Position = valor and UDim2.new(1, -21, 0.5, -9) or UDim2.new(0, 3, 0.5, -9),
+        BackgroundColor3 = Color3.new(1, 1, 1),
+        BorderSizePixel = 0,
+        ZIndex = 2,
+    }, { new("UICorner", { CornerRadius = UDim.new(1, 0) }) })
+    knob.Parent = track
+
+    local ativo = valor
+    local btnClick = new("TextButton", {
+        Size = UDim2.fromScale(1, 1),
+        BackgroundTransparency = 1,
+        Text = "",
+    })
+    btnClick.Parent = card
+    btnClick.MouseButton1Click:Connect(function()
+        ativo = not ativo
+        TweenService:Create(track, TweenInfo.new(0.2), {
+            BackgroundColor3 = ativo and C.Verde or Color3.fromRGB(70, 60, 90)
+        }):Play()
+        TweenService:Create(knob, TweenInfo.new(0.2, Enum.EasingStyle.Back), {
+            Position = ativo and UDim2.new(1, -21, 0.5, -9) or UDim2.new(0, 3, 0.5, -9)
+        }):Play()
+        if callback then callback(ativo) end
+    end)
+    return card
+end
+
+local function novoSlider(parent, nome, valor, min, max, callback, sub)
+    local card = novoCard(nome, sub)
+    card.Size = UDim2.new(1, 0, 0, 76)
+    card.Parent = parent
+
+    local valLbl = new("TextLabel", {
+        Size = UDim2.new(0, 70, 0, 20),
+        Position = UDim2.new(1, -84, 0, 10),
+        BackgroundTransparency = 1,
+        Font = Enum.Font.GothamBold,
+        TextSize = 13,
+        TextColor3 = C.RoxoClaro,
+        TextXAlignment = Enum.TextXAlignment.Right,
+        Text = tostring(valor),
+    })
+    valLbl.Parent = card
+
+    local track = new("Frame", {
+        Size = UDim2.new(1, -28, 0, 10),
+        Position = UDim2.new(0, 14, 0, 50),
+        BackgroundColor3 = Color3.fromRGB(55, 42, 75),
+        BorderSizePixel = 0,
+    }, { new("UICorner", { CornerRadius = UDim.new(1, 0) }) })
+    track.Parent = card
+
+    local pct = math.clamp((valor - min) / (max - min), 0, 1)
+    local fill = new("Frame", {
+        Size = UDim2.new(pct, 0, 1, 0),
+        BackgroundColor3 = C.Roxo,
+        BorderSizePixel = 0,
+    }, { new("UICorner", { CornerRadius = UDim.new(1, 0) }) })
+    fill.Parent = track
+
+    local knob = new("Frame", {
+        Size = UDim2.new(0, 18, 0, 18),
+        Position = UDim2.new(pct, -9, 0.5, -9),
+        BackgroundColor3 = Color3.new(1, 1, 1),
+        BorderSizePixel = 0,
+        ZIndex = 2,
+    }, { new("UICorner", { CornerRadius = UDim.new(1, 0) }) })
+    knob.Parent = track
+
+    local dragging = false
+    local function update(input)
+        local abs = track.AbsolutePosition.X
+        local sz = track.AbsoluteSize.X
+        if sz <= 0 then return end
+        local p = math.clamp((input.Position.X - abs) / sz, 0, 1)
+        local v = math.floor(min + (max - min) * p)
+        valLbl.Text = tostring(v)
+        fill.Size = UDim2.new(p, 0, 1, 0)
+        knob.Position = UDim2.new(p, -9, 0.5, -9)
+        if callback then callback(v) end
+    end
+    track.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true update(input)
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+            update(input)
+        end
+    end)
+    UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = false
+        end
+    end)
+    return card
+end
+
+local function novoBotao(parent, nome, cor, callback)
+    local btn = new("TextButton", {
+        Size = UDim2.new(1, 0, 0, 42),
+        BackgroundColor3 = cor or C.Roxo,
+        BorderSizePixel = 0,
+        Font = Enum.Font.GothamBlack,
+        TextSize = 14,
+        TextColor3 = Color3.new(1, 1, 1),
+        Text = nome,
+        AutoButtonColor = false,
+    }, { new("UICorner", { CornerRadius = UDim.new(0, 10) }) })
+    btn.Parent = parent
+    btn.MouseButton1Click:Connect(callback)
+    return btn
+end
+
+-- Sistema de abas
+local abas = {}
+local function criarAba(nome, icone)
+    local btn = new("TextButton", {
+        Size = UDim2.new(1, 0, 0, 34),
+        BackgroundColor3 = C.Aba,
+        BorderSizePixel = 0,
+        Font = Enum.Font.GothamBold,
+        TextSize = 12,
+        TextColor3 = C.Dim,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        Text = "  " .. icone .. "  " .. nome,
+        AutoButtonColor = false,
+    }, { new("UICorner", { CornerRadius = UDim.new(0, 8) }) })
+    btn.Parent = tabList
+    local frame = new("Frame", {
+        Size = UDim2.new(1, 0, 0, 0),
+        BackgroundTransparency = 1,
+        Visible = false,
+        AutomaticSize = Enum.AutomaticSize.Y,
+    }, { new("UIListLayout", { Padding = UDim.new(0, 8) }) })
+    frame.Parent = scroll
+    abas[nome] = { btn = btn, frame = frame }
+    return frame
+end
+
+local function ativarAba(nome)
+    for k, v in pairs(abas) do
+        if k == nome then
+            v.btn.BackgroundColor3 = C.AbaAtiva
+            v.btn.TextColor3 = Color3.new(1, 1, 1)
+            v.frame.Visible = true
+            tituloTab.Text = nome
+        else
+            v.btn.BackgroundColor3 = C.Aba
+            v.btn.TextColor3 = C.Dim
+            v.frame.Visible = false
+        end
+    end
+end
+
+-- ═══ ABA FARM ═══
+local abaFarm = criarAba("Farm", "🥚")
+novoToggle(abaFarm, "Instant Steal", false, function(v) CFG.InstantSteal = v end, "Pega ovo rapidamente")
+novoToggle(abaFarm, "Auto Equip Best", false, function(v) CFG.AutoEquip = v end, "Equipa melhor pet")
+novoBotao(abaFarm, "🥚 PEGAR OVO AGORA", C.Verde, function()
+    local ovos = listarOvos()
+    if #ovos > 0 then
+        local hrp = root()
+        if hrp then
+            pcall(function()
+                hrp.CFrame = CFrame.new(ovos[1].BottomCFrame.Position + Vector3.new(0, 3, 0))
+            end)
+            task.wait(0.15)
+            pegarOvo(ovos[1])
+        end
+    end
+end)
+
+-- ═══ ABA PLAYER ═══
+local abaPlayer = criarAba("Player", "🏃")
+novoToggle(abaPlayer, "Speed Boost [Q]", false, function(v)
+    CFG.SpeedBoost = v
+    local h = humanoid()
+    if h then h.WalkSpeed = v and CFG.SpeedBoostVal or CFG.OriginalSpeed end
+end, "Velocidade aumentada")
+novoSlider(abaPlayer, "Boost Speed", 300, 16, 1000, function(v)
+    CFG.SpeedBoostVal = v
+    if CFG.SpeedBoost then
+        local h = humanoid()
+        if h then h.WalkSpeed = v end
+    end
+end, "studs por segundo")
+novoToggle(abaPlayer, "Flight", false, function(v)
+    CFG.Flight = v
+    if v then Fly.start() else Fly.stop() end
+end, "WASD para voar")
+novoSlider(abaPlayer, "Flight Speed", 400, 100, 1500, function(v) CFG.FlightSpeed = v end, "studs por segundo")
+novoToggle(abaPlayer, "Anti-Ragdoll", true, function(v) CFG.AntiRagdoll = v end, "Não cai no chão")
+novoToggle(abaPlayer, "Bat Aura", false, function(v) CFG.BatAura = v end, "Bate em quem passar perto")
+
+-- ═══ ABA VISUAL ═══
+local abaVisual = criarAba("Visual", "👁️")
+novoToggle(abaVisual, "ESP Ovos", false, function(v) CFG.ES_Ovos = v end, "Highlight nos ovos")
+
+-- ═══ ABA INFO ═══
+local abaInfo = criarAba("Info", "ℹ️")
+new("TextLabel", {
+    Size = UDim2.new(1, 0, 0, 200),
+    BackgroundTransparency = 1,
+    Font = Enum.Font.Gotham,
+    TextSize = 12,
+    TextColor3 = C.Dim,
+    Text = "⚡ ZAZAK HUB v4.1\n\n" ..
+           "• Instant Steal (pega ovo rápido)\n" ..
+           "• Auto Equip Best\n" ..
+           "• Speed Boost\n" ..
+           "• Flight (WASD + Space/Ctrl)\n" ..
+           "• Bat Aura\n" ..
+           "• ESP Ovos\n" ..
+           "• Anti-Kick + Anti-Ragdoll\n\n" ..
+           "ATALHOS:\n" ..
+           "• Q = Liga/desliga Speed\n" ..
+           "• Botão Z = Abre/fecha GUI",
+    TextXAlignment = Enum.TextXAlignment.Left,
+    TextYAlignment = Enum.TextYAlignment.Top,
+    TextWrapped = true,
+}).Parent = abaInfo
+
+for nome, _ in pairs(abas) do
+    abas[nome].btn.MouseButton1Click:Connect(function() ativarAba(nome) end)
+end
+ativarAba("Farm")
+
+-- Fechar / abrir
+local function mostrar() win.Visible = true; btnFlut.Visible = false end
+local function esconder() win.Visible = false; btnFlut.Visible = true end
+btnFlut.MouseButton1Click:Connect(mostrar)
+local fecharBtn = header:FindFirstChild("Fechar")
+if fecharBtn then fecharBtn.MouseButton1Click:Connect(esconder) end
+
+-- Atalho Q
+UserInputService.InputBegan:Connect(function(input, gp)
+    if gp then return end
+    if input.KeyCode == Enum.KeyCode.Q then
+        CFG.SpeedBoost = not CFG.SpeedBoost
+        local h = humanoid()
+        if h then
+            h.WalkSpeed = CFG.SpeedBoost and CFG.SpeedBoostVal or CFG.OriginalSpeed
+        end
+    end
+end)
+
+--═══════════════════════════════════════════════════════════════
+-- INICIAR
+--═══════════════════════════════════════════════════════════════
+pcall(ativarAntiKick)
+local h = humanoid()
+if h then CFG.OriginalSpeed = h.WalkSpeed end
+
+notify("ZAZAK HUB v4.1", "Carregado! Clica no Z", 5)
+print("[Zazak Hub v4.1] Carregado")
